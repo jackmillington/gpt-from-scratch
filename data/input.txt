@@ -1,0 +1,23 @@
+The workshop lights came on before sunrise. Small machines waited on the benches while their sensors warmed and their controllers checked each connection. A mobile robot rolled forward, measured the open floor, corrected its heading, and tried again. Every movement created new information.
+
+Engineering is an iterative process. A useful system begins with a simple model, then improves through observation, measurement, and testing. Software receives data, transforms it into state, chooses an action, and verifies the result. When the world changes, a robust system should notice the mismatch and adapt rather than continue blindly.
+
+A robot does not experience the world as a person does. It receives numbers from cameras, encoders, inertial sensors, range sensors, and other devices. Those measurements contain delay and noise. State estimation combines imperfect observations into a useful belief about position, velocity, orientation, or the surrounding environment.
+
+Control turns that belief into motion. A controller compares the desired state with the estimated state and produces an action. Good control is not only about reaching a target. It is also about stability, smoothness, safety, and recovery when the model is wrong.
+
+Planning works at a different level. A planner decides which state should come next and which route or sequence of actions can reach a goal. Some plans are deterministic. Others must be revised when a blocked path, new object, failed component, or unexpected observation changes what the system knows.
+
+Machine learning adds another layer. Instead of specifying every rule directly, an engineer can train a model from examples. The model learns patterns that help classify, predict, generate, or choose. Training adjusts parameters so that predictions become more consistent with the data.
+
+A language model learns by predicting tokens. During training, it receives a sequence and attempts to predict the next token at every position. Causal attention prevents the model from looking ahead. Each token can attend only to itself and to tokens that appeared earlier in the sequence.
+
+A transformer repeats this process through several blocks. Attention allows information to move between token positions. Feed-forward layers transform the representation at each position. Residual connections preserve useful information, and layer normalisation helps keep optimisation stable.
+
+Generation begins with a prompt. The model predicts a probability distribution for the next token, samples one token, appends it to the context, and repeats. Temperature changes how sharp that probability distribution is. Top-k sampling can restrict the choice to the most likely candidates.
+
+This repository is intentionally small enough to read. The goal is not to compete with large production language models. The goal is to make the important mechanics visible: tokenisation, embeddings, positions, causal self-attention, transformer blocks, optimisation, checkpointing, and autoregressive generation.
+
+Readable systems are easier to debug. When training loss stops improving, the engineer should be able to inspect the data, the batch construction, the gradients, the optimiser, and the model. When generated text is poor, the engineer can ask whether the corpus is large enough, whether the model capacity is appropriate, and whether training ran for long enough.
+
+The same principle applies beyond language models. Whether the system is a robot, an automation pipeline, or a neural network, reliable engineering depends on understanding state, uncertainty, feedback, and failure. Tools can accelerate implementation, but the engineer still owns the behaviour of the system.
