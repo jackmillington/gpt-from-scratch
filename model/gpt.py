@@ -1,108 +1,184 @@
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-from torchtyping import TensorType
+import torch.nn.functional as F
 
-# 1. Remember to include an additional LayerNorm after the block sequence and before the final linear layer
-# 2. Instantiate in the following order: Word embeddings, position embeddings, transformer blocks, final layer norm, and vocabulary projection.
-class GPT(nn.Module):
 
-    def __init__(self, vocab_size: int, context_length: int, model_dim: int, num_blocks: int, num_heads: int):
+@dataclass
+class GPTConfig:
+    vocab_size: int
+    context_length: int = 64
+    model_dim: int = 128
+    num_heads: int = 4
+    num_layers: int = 4
+    dropout: float = 0.1
+
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config: GPTConfig):
         super().__init__()
-        torch.manual_seed(0)
-        # Hint: nn.Sequential() will be useful for the block sequence
-        self.word_embed = nn.Embedding(vocab_size, model_dim)
-        self.pos_embed = nn.Embedding(context_length, model_dim)
-        self.trans_blocks = nn.Sequential()
-        for i in range(num_blocks):
-            self.trans_blocks.append(self.TransformerBlock(model_dim, num_heads))
-        self.laynorm = nn.LayerNorm(model_dim)
-        self.proj = nn.Linear(model_dim, vocab_size)
-        
+        if config.model_dim % config.num_heads != 0:
+            raise ValueError("model_dim must be divisible by num_heads")
 
-    def forward(self, context: TensorType[int]) -> TensorType[float]:
-        torch.manual_seed(0)
-        # 1. Add token embeddings + position embeddings (use torch.arange for positions)
-        # 2. Pass through transformer blocks
-        # 3. Apply final LayerNorm, then project to vocab_size
-        # 4. Return logits rounded to 4 decimal places (no softmax)
-        em = self.word_embed(context)
-        pos = torch.arange(context.shape[1], device=context.device)
-        x = em+self.pos_embed(pos)
-        x = self.trans_blocks(x)
-        x = self.laynorm(x)
-        x = self.proj(x)
-        return torch.round(x, decimals=4)
+        self.num_heads = config.num_heads
+        self.head_dim = config.model_dim // config.num_heads
+
+        self.qkv = nn.Linear(config.model_dim, 3 * config.model_dim, bias=False)
+        self.proj = nn.Linear(config.model_dim, config.model_dim, bias=False)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+
+        mask = torch.tril(torch.ones(config.context_length, config.context_length))
+        self.register_buffer(
+            "causal_mask",
+            mask.view(1, 1, config.context_length, config.context_length),
+            persistent=False,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, model_dim = x.shape
+
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        scores = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+        scores = scores.masked_fill(
+            self.causal_mask[:, :, :seq_len, :seq_len] == 0,
+            float("-inf"),
+        )
+
+        weights = F.softmax(scores, dim=-1)
+        weights = self.attn_dropout(weights)
+
+        out = weights @ v
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, model_dim)
+        return self.resid_dropout(self.proj(out))
 
 
+class FeedForward(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(config.model_dim, 4 * config.model_dim),
+            nn.GELU(),
+            nn.Linear(4 * config.model_dim, config.model_dim),
+            nn.Dropout(config.dropout),
+        )
 
-    # Do NOT modify the code below this line
-    class TransformerBlock(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
-        class MultiHeadedSelfAttention(nn.Module):
 
-            class SingleHeadAttention(nn.Module):
-                def __init__(self, model_dim: int, head_size: int):
-                    super().__init__()
-                    torch.manual_seed(0)
-                    self.key_gen = nn.Linear(model_dim, head_size, bias=False)
-                    self.query_gen = nn.Linear(model_dim, head_size, bias=False)
-                    self.value_gen = nn.Linear(model_dim, head_size, bias=False)
-                
-                def forward(self, embedded: TensorType[float]) -> TensorType[float]:
-                    k = self.key_gen(embedded)
-                    q = self.query_gen(embedded)
-                    v = self.value_gen(embedded)
+class TransformerBlock(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(config.model_dim)
+        self.attention = CausalSelfAttention(config)
+        self.ln2 = nn.LayerNorm(config.model_dim)
+        self.feed_forward = FeedForward(config)
 
-                    scores = q @ torch.transpose(k, 1, 2) # @ is the same as torch.matmul()
-                    context_length, attention_dim = k.shape[1], k.shape[2]
-                    scores = scores / (attention_dim ** 0.5)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attention(self.ln1(x))
+        x = x + self.feed_forward(self.ln2(x))
+        return x
 
-                    lower_triangular = torch.tril(torch.ones(context_length, context_length))
-                    mask = lower_triangular == 0
-                    scores = scores.masked_fill(mask, float('-inf'))
-                    scores = nn.functional.softmax(scores, dim = 2)
 
-                    return scores @ v
-                
-            def __init__(self, model_dim: int, num_heads: int):
-                super().__init__()
-                torch.manual_seed(0)
-                self.att_heads = nn.ModuleList()
-                for i in range(num_heads):
-                    self.att_heads.append(self.SingleHeadAttention(model_dim, model_dim // num_heads))
-                self.output_proj = nn.Linear(model_dim, model_dim, bias=False)
+class GPT(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.config = config
 
-            def forward(self, embedded: TensorType[float]) -> TensorType[float]:
-                head_outputs = []
-                for head in self.att_heads:
-                    head_outputs.append(head(embedded))
-                concatenated = torch.cat(head_outputs, dim = 2)
-                return self.output_proj(concatenated)
-        
-        class VanillaNeuralNetwork(nn.Module):
+        self.token_embedding = nn.Embedding(config.vocab_size, config.model_dim)
+        self.position_embedding = nn.Embedding(config.context_length, config.model_dim)
+        self.dropout = nn.Dropout(config.dropout)
+        self.blocks = nn.ModuleList(
+            [TransformerBlock(config) for _ in range(config.num_layers)]
+        )
+        self.final_norm = nn.LayerNorm(config.model_dim)
+        self.lm_head = nn.Linear(config.model_dim, config.vocab_size, bias=False)
 
-            def __init__(self, model_dim: int):
-                super().__init__()
-                torch.manual_seed(0)
-                self.up_projection = nn.Linear(model_dim, model_dim * 4)
-                self.relu = nn.ReLU()
-                self.down_projection = nn.Linear(model_dim * 4, model_dim)
-                self.dropout = nn.Dropout(0.2) # using p = 0.2
-            
-            def forward(self, x: TensorType[float]) -> TensorType[float]:
-                torch.manual_seed(0)
-                return self.dropout(self.down_projection(self.relu(self.up_projection(x))))
+        self.lm_head.weight = self.token_embedding.weight
+        self.apply(self._init_weights)
 
-        def __init__(self, model_dim: int, num_heads: int):
-            super().__init__()
-            torch.manual_seed(0)
-            self.attention = self.MultiHeadedSelfAttention(model_dim, num_heads)
-            self.linear_network = self.VanillaNeuralNetwork(model_dim)
-            self.first_norm = nn.LayerNorm(model_dim)
-            self.second_norm = nn.LayerNorm(model_dim)
+    @staticmethod
+    def _init_weights(module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-        def forward(self, embedded: TensorType[float]) -> TensorType[float]:
-            torch.manual_seed(0)
-            embedded = embedded + self.attention(self.first_norm(embedded)) # skip connection
-            embedded = embedded + self.linear_network(self.second_norm(embedded)) # another skip connection
-            return embedded
+    def forward(
+        self,
+        token_ids: torch.Tensor,
+        targets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if token_ids.ndim != 2:
+            raise ValueError("token_ids must have shape (batch, sequence)")
+
+        _, seq_len = token_ids.shape
+        if seq_len > self.config.context_length:
+            raise ValueError(
+                f"sequence length {seq_len} exceeds context length "
+                f"{self.config.context_length}"
+            )
+
+        positions = torch.arange(seq_len, device=token_ids.device)
+        x = self.token_embedding(token_ids) + self.position_embedding(positions)
+        x = self.dropout(x)
+
+        for block in self.blocks:
+            x = block(x)
+
+        x = self.final_norm(x)
+        logits = self.lm_head(x)
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+            )
+
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(
+        self,
+        token_ids: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+    ) -> torch.Tensor:
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than 0")
+
+        was_training = self.training
+        self.eval()
+
+        for _ in range(max_new_tokens):
+            context = token_ids[:, -self.config.context_length :]
+            logits, _ = self(context)
+            logits = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                k = min(top_k, logits.size(-1))
+                values, _ = torch.topk(logits, k)
+                cutoff = values[:, [-1]]
+                logits = logits.masked_fill(logits < cutoff, float("-inf"))
+
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            token_ids = torch.cat((token_ids, next_token), dim=1)
+
+        if was_training:
+            self.train()
+
+        return token_ids
